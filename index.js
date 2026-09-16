@@ -1,57 +1,95 @@
 const express = require('express');
+const mongoose = require('mongoose'); // Thêm thư viện database
 const app = express();
-app.use(express.json()); // Bật chế độ đọc dữ liệu JSON
+app.use(express.json());
 
-// Mã bí mật bạn tự đặt để xác minh với Facebook
-const VERIFY_TOKEN = 'omni_crm_secret_2026';
+const VERIFY_TOKEN = "omni_crm_secret_2026"; 
 
 /* ==========================================
-   1. API GET: Để Facebook kiểm tra xác minh 
+   KẾT NỐI DATABASE MONGODB
+   ========================================== */
+// Thay chuỗi kết nối của bạn vào đây (Nhớ thay username và password)
+const MONGO_URI = "mongodb+srv://eduzteam09_db_user:7m5KjuPM3P1FVMsv@crm-omni.b2j6acf.mongodb.net/?appName=crm-omni";
+
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('Đã kết nối thành công với Database MongoDB!'))
+  .catch(err => console.error('Lỗi kết nối Database:', err));
+
+/* ==========================================
+   ĐỊNH NGHĨA CẤU TRÚC (MODEL) CHO LEAD
+   ========================================== */
+const leadSchema = new mongoose.Schema({
+    facebookId: String,       // ID khách hàng trên FB
+    customerName: String,     // Tên khách (Có thể lấy từ FB Profile API)
+    lastMessage: String,      // Nội dung tin nhắn cuối cùng
+    status: { type: String, default: 'Mới' }, // Trạng thái mặc định
+    source: { type: String, default: 'Facebook Messenger' },
+    createdAt: { type: Date, default: Date.now }
+});
+
+const Lead = mongoose.model('Lead', leadSchema);
+
+/* ==========================================
+   1. API GET: Xác minh với Facebook (Giữ nguyên)
    ========================================== */
 app.get('/webhook/facebook', (req, res) => {
-  let mode = req.query['hub.mode'];
-  let token = req.query['hub.verify_token'];
-  let challenge = req.query['hub.challenge'];
+    let mode = req.query['hub.mode'];
+    let token = req.query['hub.verify_token'];
+    let challenge = req.query['hub.challenge'];
 
-  // Kiểm tra xem mã Facebook gửi qua có khớp với mã của mình không
-  if (mode && token) {
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      console.log('Xác minh thành công!');
-      res.status(200).send(challenge); // Bắt buộc phải trả về challenge
-    } else {
-      res.sendStatus(403); // Sai mã, từ chối
+    if (mode && token) {
+        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+            console.log("Xác minh Webhook thành công!");
+            res.status(200).send(challenge);
+        } else {
+            res.sendStatus(403);
+        }
     }
-  }
 });
 
 /* ==========================================
-   2. API POST: Để nhận tin nhắn khách hàng gửi tới 
+   2. API POST: Nhận tin và LƯU DATABASE
    ========================================== */
-app.post('/webhook/facebook', (req, res) => {
-  let body = req.body;
+app.post('/webhook/facebook', async (req, res) => { // Lưu ý thêm chữ 'async'
+    let body = req.body;
 
-  // Kiểm tra xem dữ liệu có đúng là từ Fanpage gửi tới không
-  if (body.object === 'page') {
-    body.entry.forEach(function (entry) {
-      // Lấy nội dung tin nhắn
-      let webhook_event = entry.messaging[0];
-      let sender_psid = webhook_event.sender.id; // ID khách hàng
-      let message_text = webhook_event.message.text; // Nội dung khách chat
+    if (body.object === 'page') {
+        // Dùng vòng lặp for...of để dùng được await với Database
+        for (let entry of body.entry) {
+            let webhook_event = entry.messaging[0];
+            let sender_psid = webhook_event.sender.id; 
+            let message_text = webhook_event.message.text;
 
-      console.log(
-        'Khách hàng ID ' + sender_psid + ' vừa nhắn: ' + message_text
-      );
+            console.log(`Nhận tin nhắn từ ID ${sender_psid}: ${message_text}`);
 
-      // ---> TẠI ĐÂY: Lập trình viên sẽ viết code chuyển "message_text"
-      // qua AI xử lý, sau đó lưu thành Lead hoặc tạo Đơn hàng vào CRM.
-    });
+            try {
+                // KIỂM TRA & LƯU VÀO DATABASE
+                // Kiểm tra xem khách này đã từng chat chưa (đã có Lead chưa)
+                let existingLead = await Lead.findOne({ facebookId: sender_psid });
 
-    // Bắt buộc phải báo lại cho Facebook là "Tôi đã nhận được tin nhắn" (Status 200)
-    res.status(200).send('EVENT_RECEIVED');
-  } else {
-    res.sendStatus(404);
-  }
+                if (!existingLead) {
+                    // Nếu khách mới tinh -> Tạo Lead mới
+                    const newLead = new Lead({
+                        facebookId: sender_psid,
+                        customerName: "Khách FB " + sender_psid, // Tạm đặt tên, sau này dùng API FB lấy tên thật
+                        lastMessage: message_text
+                    });
+                    await newLead.save(); // Lệnh lưu vào Database
+                    console.log("-> Đã tạo mới 1 Lead thành công trong Database!");
+                } else {
+                    // Nếu khách cũ -> Cập nhật tin nhắn mới nhất
+                    existingLead.lastMessage = message_text;
+                    await existingLead.save();
+                    console.log("-> Đã cập nhật tin nhắn cho Lead hiện tại.");
+                }
+            } catch (error) {
+                console.error("Lỗi khi lưu Database:", error);
+            }
+        }
+        res.status(200).send('EVENT_RECEIVED');
+    } else {
+        res.sendStatus(404);
+    }
 });
 
-// Chạy server ở cổng 3000
-app.listen(3000, () => console.log('Webhook đang chạy ở cổng 3000...'));
+app.listen(3000, () => console.log('Webhook & Database đang chạy ở cổng 3000...'));
