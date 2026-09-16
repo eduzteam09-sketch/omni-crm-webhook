@@ -6,6 +6,7 @@
   },
   "dependencies": {
     "express": "^4.22.3",
+    "axios": "^1.6.8",
     "mongoose": "^8.0.0"
   }
 }
